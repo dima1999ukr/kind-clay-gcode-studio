@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KIND Clay Custom G-Code Studio – Delta WASP 2040 Clay</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span>KIND Clay Custom G-Code Studio</span>
+        <span class="brand-sub">Ton-3D-Druck · Delta WASP 2040</span>
+      </div>
+      <div class="topbar-actions">
+        <label class="preset-picker" for="presetSelect">
+          <span style="color:var(--muted);font-size:12px;">Vorlage:</span>
+          <select id="presetSelect" style="width:auto;min-width:195px;">
+            <option value="espresso" selected>Espressotasse</option>
+            <option value="tumbler">Becher / Tumbler</option>
+            <option value="vase">Bauchige Vase</option>
+            <option value="lampshade">Lampenschirm</option>
+            <option value="square_vase">Viereckige Vase (4 Wände)</option>
+            <option value="parametric">✦ Eigene Form gestalten</option>
+          </select>
+        </label>
+        <button id="btnSaveGcode" type="button" class="primary">Druckdatei speichern…</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <!-- LEFT SIDEBAR: FORM -> SURFACE -> PRINTER -->
+      <aside class="sidebar">
+        <div class="sidebar-kicker">1 · Form</div>
+
+        <!-- File input (top of Form section) -->
+        <section class="card collapsible collapsed" id="cardImport">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Eigene Datei laden</span>
+            <span id="currentFileBadge" class="tag">Vorlage</span>
+          </div>
+          <div class="card-body">
+            <div id="dropzone" class="dropzone" tabindex="0">
+              <strong>.3dm · .stl · .obj · .3mf · .gcode</strong><br />
+              <small>Datei hier ablegen oder klicken (Rhino, Slicer, etc.)</small>
+              <input id="fileInput" type="file" accept=".gcode,.gco,.txt,.3dm,.stl,.obj,.3mf,.ply" hidden />
+            </div>
+          </div>
+        </section>
+
+        <!-- Parametric Form Sculptor (2D Profile A-E + Sides + Twist) -->
+        <section class="card collapsible collapsed" id="cardParametric">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Form gestalten (Profil A–E)</span>
+            <span id="paramBadge" class="tag">H120 · Ø76</span>
+          </div>
+          <div class="card-body">
+            <canvas id="profileCanvas" class="profile-canvas" width="286" height="156" title="Ziehe die orangefarbenen Punkte, um die Silhouette frei zu formen"></canvas>
+            <div class="face-quick-row">
+              <button type="button" class="chip" data-prof="cylinder">Zylinder</button>
+              <button type="button" class="chip" data-prof="amphora">Bauchig</button>
+              <button type="button" class="chip" data-prof="chalice">Kelch</button>
+              <button type="button" class="chip" data-prof="hourglass">Sanduhr</button>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Höhe (mm)</span><strong id="valParamH">120</strong></div>
+                <input id="paramH" type="range" min="35" max="260" step="2" value="120" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Seiten (3–Rund)</span><strong id="valParamSides">Rund</strong></div>
+                <input id="paramSides" type="range" min="3" max="64" step="1" value="64" />
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Ecken-Rundung</span><strong id="valParamRound">35%</strong></div>
+                <input id="paramRound" type="range" min="0" max="100" step="5" value="35" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Drehung (Twist)</span><strong id="valParamTwist">0°</strong></div>
+                <input id="paramTwist" type="range" min="-240" max="240" step="5" value="0" />
+              </div>
+            </div>
+            <label class="toggle-label">
+              <input id="paramSmooth" type="checkbox" checked />
+              <span>Weiche Kurve (aus = eckige Facetten)</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Selective Wall / Face Mask -->
+        <section class="card collapsible collapsed" id="cardFaceMask">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Wände auswählen</span>
+            <span id="faceMaskBadge" class="tag">Alle 4</span>
+          </div>
+          <div class="card-body">
+            <div class="face-plan" aria-label="Wandauswahl Draufsicht">
+              <span></span>
+              <button type="button" class="face-btn active" data-face="back">Hinten</button>
+              <span></span>
+              <button type="button" class="face-btn active" data-face="left">Links</button>
+              <div class="face-center">Draufsicht</div>
+              <button type="button" class="face-btn active" data-face="right">Rechts</button>
+              <span></span>
+              <button type="button" class="face-btn active" data-face="front">Vorne</button>
+              <span></span>
+            </div>
+            <div class="face-quick-row">
+              <button type="button" id="btnFaceFrontOnly" class="chip">Nur Vorne</button>
+              <button type="button" id="btnFaceFrontBack" class="chip">Vorne + Hinten</button>
+              <button type="button" id="btnFaceAll" class="chip active">Alle 4</button>
+            </div>
+            <div class="hint-micro">
+              Muster wirken nur auf aktive Wände – du kannst auch direkt im 3D-Modell auf eine Wand klicken.
+            </div>
+          </div>
+        </section>
+
+        <div class="sidebar-kicker">2 · Oberfläche &amp; Muster</div>
+
+        <!-- Modifier A: Horizontales Weaving (XY) -->
+        <section class="card collapsible" id="cardWeave">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Horizontales Weaving</span>
+            <label class="toggle-label"><input id="weaveOn" type="checkbox" /> <span class="tag weave">An</span></label>
+          </div>
+          <div class="card-body">
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Muster</span></div>
+                <select id="weaveWaveform">
+                  <option value="sine" selected>Weiche Wellen</option>
+                  <option value="triangle">Falten (Pleats)</option>
+                  <option value="square">Blöcke (Brick)</option>
+                  <option value="sawtooth">Finnen (Sägezahn)</option>
+                  <option value="scales">Schuppen</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Richtung</span></div>
+                <select id="weaveMode">
+                  <option value="symmetric">Innen &amp; außen</option>
+                  <option value="outward" selected>Nur nach außen</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Tiefe (mm)</span><strong id="valWeaveH">2.2</strong></div>
+              <input id="weaveH" type="range" min="0" max="10" step="0.2" value="2.2" />
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Wellen pro Runde</span><strong id="valWeaveFreq">16</strong></div>
+                <input id="weaveFreq" type="range" min="4" max="36" step="1" value="16" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Versatz je Schicht</span><strong id="valWeavePhase">0.50</strong></div>
+                <input id="weavePhase" type="range" min="0" max="1" step="0.05" value="0.5" />
+              </div>
+            </div>
+            <div class="field" id="wrapWeaveSharp">
+              <div class="field-label"><span>Kanten-Schärfe</span><strong id="valWeaveSharp">1.8</strong></div>
+              <input id="weaveSharp" type="range" min="0.8" max="4.5" step="0.1" value="1.8" />
+            </div>
+            <div class="field" id="wrapBrickDuty" style="display:none;">
+              <div class="field-label"><span>Brick-Breite (Abstand 2 Punkte)</span><strong id="valBrickDuty">50%</strong></div>
+              <input id="weaveBrickDuty" type="range" min="15" max="85" step="5" value="50" />
+            </div>
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Höhenbereich von (mm)</span></div>
+                <input id="weaveZMin" type="number" step="1" value="6" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>bis (mm)</span></div>
+                <input id="weaveZMax" type="number" step="1" value="58" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Modifier B: Non-Planar (Z-Wellen) -->
+        <section class="card collapsible collapsed" id="cardNonPlanar">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Non-Planar</span>
+            <label class="toggle-label"><input id="npOn" type="checkbox" /> <span class="tag">An</span></label>
+          </div>
+          <div class="card-body">
+            <div class="field">
+              <div class="field-label"><span>Effekt</span></div>
+              <select id="npMode">
+                <option value="waves" selected>Wellen in der Wand</option>
+                <option value="rim_wave">Gewellter Rand oben</option>
+                <option value="tilt">Schräge Schichten</option>
+              </select>
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Wellenhöhe (mm)</span><strong id="valNpZ">1.2</strong></div>
+              <input id="npZ" type="range" min="0" max="6" step="0.1" value="1.2" />
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Wellen pro Runde</span><strong id="valNpFreq">12</strong></div>
+                <input id="npFreq" type="range" min="1" max="32" step="1" value="12" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Versatz / Drehung</span><strong id="valNpPhase">0.50</strong></div>
+                <input id="npPhase" type="range" min="0" max="1" step="0.05" value="0.5" />
+              </div>
+            </div>
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Höhenbereich von (mm)</span></div>
+                <input id="npZMin" type="number" step="1" value="8" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>bis (mm)</span></div>
+                <input id="npZMax" type="number" step="1" value="58" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Modifier C: Pure Flow-Modulator (E & F only, zero XYZ geometry change!) -->
+        <section class="card collapsible collapsed" id="cardOoze">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Flow-Modulator</span>
+            <label class="toggle-label"><input id="oozeOn" type="checkbox" /> <span class="tag ooze">An</span></label>
+          </div>
+          <div class="card-body">
+            <div class="hint-micro">
+              Ändert nur den Tonfluss (E) &amp; das Tempo – deine modellierte Form/Bahn bleibt 100 % unverändert.
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Kurvenform</span></div>
+              <select id="oozeCurve">
+                <option value="smooth" selected>Weiche Glocke (organisch)</option>
+                <option value="sharp">Spitzer Impuls (stark)</option>
+                <option value="plateau">Plateau (langer Wulst)</option>
+                <option value="ramp_up">Langsam an → Abbruch</option>
+                <option value="ramp_down">Sofort dick → Auslaufen</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Min. Fluss (0 = aus)</span><strong id="valOozeFlowMin">0.20×</strong></div>
+                <input id="oozeFlowMin" type="range" min="0" max="1.2" step="0.05" value="0.2" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Max. Fluss</span><strong id="valOozeFlowMax">2.80×</strong></div>
+                <input id="oozeFlowMax" type="range" min="1.0" max="5.0" step="0.1" value="2.8" />
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Impuls-Breite</span><strong id="valOozeWidth">70%</strong></div>
+                <input id="oozeWidth" type="range" min="15" max="98" step="5" value="70" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Tempo am Peak</span><strong id="valOozeSpeedMin">45%</strong></div>
+                <input id="oozeSpeedMin" type="range" min="20" max="100" step="5" value="45" />
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Impulse pro Runde</span><strong id="valOozeCount">14</strong></div>
+                <input id="oozeCount" type="range" min="3" max="32" step="1" value="14" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Abstand (Schichten)</span><strong id="valOozeEvery">4</strong></div>
+                <input id="oozeEvery" type="range" min="1" max="20" step="1" value="4" />
+              </div>
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Versatz je Reihe</span><strong id="valOozePhase">0.50</strong></div>
+              <input id="oozePhase" type="range" min="0" max="1" step="0.05" value="0.5" />
+            </div>
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Höhenbereich von (mm)</span></div>
+                <input id="oozeZMin" type="number" step="1" value="8" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>bis (mm)</span></div>
+                <input id="oozeZMax" type="number" step="1" value="58" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Modifier D: Image-Heightmap Relief -->
+        <section class="card collapsible collapsed" id="cardHeightmap">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Bild als Relief</span>
+            <label class="toggle-label"><input id="hmOn" type="checkbox" /> <span class="tag">An</span></label>
+          </div>
+          <div class="card-body">
+            <div class="hm-upload-row">
+              <button type="button" id="btnHmUpload" class="chip" style="flex:1;">Eigenes Bild laden (.png/.jpg)</button>
+              <input id="hmFileInput" type="file" accept="image/*" hidden />
+              <span id="hmStatusBadge" class="tag">Kein Bild</span>
+            </div>
+            <div class="face-quick-row">
+              <button type="button" class="chip" data-hm-proc="voronoi">Voronoi</button>
+              <button type="button" class="chip" data-hm-proc="checker">Schach</button>
+              <button type="button" class="chip" data-hm-proc="diagonal">Raute</button>
+              <button type="button" class="chip" data-hm-proc="circles">Noppen</button>
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Relief-Tiefe (mm)</span><strong id="valHmDepth">2.5</strong></div>
+              <input id="hmDepth" type="range" min="-6" max="8" step="0.2" value="2.5" />
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Rundum wiederholen</span><strong id="valHmRepX">2.0×</strong></div>
+                <input id="hmRepX" type="range" min="0.5" max="8" step="0.5" value="2" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>In Höhe wiederholen</span><strong id="valHmRepY">1.0×</strong></div>
+                <input id="hmRepY" type="range" min="0.5" max="6" step="0.5" value="1" />
+              </div>
+            </div>
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Höhenbereich von (mm)</span></div>
+                <input id="hmZMin" type="number" step="1" value="8" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>bis (mm)</span></div>
+                <input id="hmZMax" type="number" step="1" value="100" />
+              </div>
+            </div>
+            <label class="toggle-label">
+              <input id="hmInvert" type="checkbox" />
+              <span>Hell &amp; Dunkel tauschen</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="sidebar-kicker">3 · Drucker</div>
+
+        <!-- Target printer & nozzle -->
+        <section class="card collapsible collapsed" id="cardPrinter">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Drucker &amp; Düse</span>
+            <span id="printerSummaryBadge" class="tag">WASP · 2.0 mm</span>
+          </div>
+          <div class="card-body">
+            <div class="field">
+              <div class="field-label"><span>Zieldrucker</span></div>
+              <select id="printerSelect">
+                <option value="wasp_2040_clay" selected>Delta WASP 2040 Clay (Ton · Ø200×400)</option>
+                <option value="ender_5_s1">Creality Ender-5 S1 (PLA · 220×220×280)</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <div class="field-label">
+                <span>Düsengröße (mm)</span>
+                <strong id="valNozzle">2.0 mm</strong>
+              </div>
+              <div class="field-row">
+                <input id="inNozzle" type="number" step="0.1" min="0.2" max="8.0" value="2.0" />
+                <div id="nozzlePresets" class="preset-row"></div>
+              </div>
+            </div>
+
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Schichthöhe (mm)</span></div>
+                <input id="inLayerH" type="number" step="0.04" min="0.08" max="5.0" value="1.2" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Linienbreite (mm)</span></div>
+                <input id="inLineW" type="number" step="0.05" min="0.2" max="8.0" value="2.2" />
+              </div>
+            </div>
+
+            <div id="fdmTempsRow" class="field-row" style="display:none;">
+              <div class="field">
+                <div class="field-label"><span>Düse (°C)</span></div>
+                <input id="inNozzleTemp" type="number" step="5" min="170" max="260" value="205" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Bett (°C)</span></div>
+                <input id="inBedTemp" type="number" step="5" min="0" max="100" value="60" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Lüfter (%)</span></div>
+                <input id="inFanPct" type="number" step="10" min="0" max="100" value="80" />
+              </div>
+            </div>
+
+            <label class="toggle-label" title="Aus = offener Boden (z. B. um den Tonboden später einzugießen)">
+              <input id="chkIncludeBase" type="checkbox" checked />
+              <span>Boden mitdrucken</span>
+            </label>
+
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Tonfluss (Flow)</span><strong id="valFlow">1.00×</strong></div>
+                <input id="inFlow" type="range" min="0.4" max="2.2" step="0.05" value="1.0" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Tempo F (mm/min)</span></div>
+                <input id="inSpeed" type="number" step="60" min="180" max="3600" value="900" />
+              </div>
+            </div>
+
+            <div class="field-row expert-only">
+              <div class="field">
+                <div class="field-label"><span>Größe (XY-Faktor)</span></div>
+                <input id="inScaleXY" type="number" step="0.05" min="0.2" max="2.5" value="1.0" />
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Max. Winkel (°)</span></div>
+                <input id="inMaxAngle" type="number" step="1" min="10" max="65" value="42" />
+              </div>
+            </div>
+
+            <label class="toggle-label expert-only">
+              <input id="chkRecalcE" type="checkbox" checked />
+              <span>Tonmenge neu berechnen (M83 Relative Extrusion)</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Live-Update Bar & Manual Trigger (Expert only) -->
+        <section class="card expert-only" style="gap: 7px;">
+          <label class="toggle-label">
+            <input id="chkLiveUpdate" type="checkbox" checked />
+            <span><strong>Echtzeit-Vorschau</strong> (direkt beim Ziehen)</span>
+          </label>
+          <button id="btnApplyProcess" type="button" class="primary" style="padding: 9px;">
+            Jetzt neu berechnen
+          </button>
+        </section>
+      </aside>
+
+      <!-- CENTER: 3D THREE.JS VIEWPORT -->
+      <section class="viewport-wrap">
+        <div class="viewport-overlay-top">
+          <div class="overlay-group">
+            <button id="btnViewToolpath" class="chip active" type="button" title="Zeigt die einzelnen Druckbahnen als CAD-Linien">Druckbahnen</button>
+            <button id="btnViewRender" class="chip" type="button" title="Realistische 3D-Vorschau des gedruckten Tons">✦ Ton-Vorschau</button>
+            <button id="btnToggleGhost" class="chip active" type="button" title="Blendet die glatte Grundform transparent ein, damit du deine Änderungen direkt siehst">Original-Form</button>
+          </div>
+          <div id="toolpathColorGroup" class="overlay-group expert-only">
+            <span style="color:var(--muted);font-size:11px;">Farbe:</span>
+            <button class="chip active" data-color="slope">Steigung</button>
+            <button class="chip" data-color="z">Höhe</button>
+            <button class="chip" data-color="speed">Tempo</button>
+            <button class="chip" data-color="flow">Tonfluss</button>
+          </div>
+          <div class="overlay-group">
+            <div id="legendWrap" class="legend expert-only">
+              <span id="legendLow">0°</span>
+              <div class="legend-bar"></div>
+              <span id="legendHigh">Limit</span>
+            </div>
+            <button id="btnResetCam" class="chip" type="button">Ansicht zentrieren</button>
+          </div>
+        </div>
+
+        <div id="viewport3d"></div>
+
+        <div class="playback-bar">
+          <button id="btnPlay" type="button">▶ Simulieren</button>
+          <div id="scrubTrack" class="scrub-track" tabindex="0" title="Ziehen = Druckverlauf prüfen · Gedrückt halten & nach oben ziehen = Zeitlupe">
+            <div id="scrubFill" class="scrub-fill" style="width:100%;"></div>
+            <div id="scrubThumb" class="scrub-thumb" style="left:100%;"></div>
+            <div id="scrubHud" class="scrub-hud">Ziehen = Schicht · ↑ hochziehen = Zeitlupe</div>
+          </div>
+          <span id="playbackInfo" class="playback-info">100% · Z 0.0 mm</span>
+        </div>
+      </section>
+
+      <!-- RIGHT SIDEBAR: CHECKS, OVERVIEW, SHRINKAGE & EXPERT G-CODE -->
+      <aside class="sidebar right">
+        <section class="card collapsible">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Druck-Check</span>
+          </div>
+          <div class="card-body">
+            <div id="checksList" class="checks-list"></div>
+          </div>
+        </section>
+
+        <section class="card collapsible">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Übersicht</span>
+          </div>
+          <div class="card-body">
+            <div class="stats-grid">
+              <div class="stat-box"><div class="k">Druckzeit (ca.)</div><div id="stTime" class="v">–</div></div>
+              <div class="stat-box"><div class="k">Tonbedarf</div><div id="stMat" class="v">–</div></div>
+              <div class="stat-box"><div class="k">Höhe</div><div id="stHeight" class="v">–</div></div>
+              <div class="stat-box expert-only"><div class="k">Zeit / Schicht</div><div id="stLayerTime" class="v">–</div></div>
+              <div class="stat-box expert-only"><div class="k">Max. Steigung</div><div id="stSlope" class="v">–</div></div>
+              <div class="stat-box expert-only"><div class="k">Ton-Tropfen</div><div id="stOoze" class="v">–</div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card collapsible" id="cardShrinkage">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Ton-Schwund (Brand)</span>
+            <span id="shrinkBadge" class="tag">11.0%</span>
+          </div>
+          <div class="card-body">
+            <div class="face-quick-row">
+              <button type="button" class="chip" data-shrink="8">Irdenware 8%</button>
+              <button type="button" class="chip active" data-shrink="11">Steinzeug 11%</button>
+              <button type="button" class="chip" data-shrink="13">Porzellan 13%</button>
+            </div>
+            <div class="field">
+              <div class="field-label"><span>Schrumpfung beim Brennen</span><strong id="valShrinkPct">11.0%</strong></div>
+              <input id="inShrinkPct" type="range" min="0" max="20" step="0.5" value="11" />
+            </div>
+            <label class="toggle-label" title="Vergrößert den Druck automatisch, damit das Objekt nach dem Brennen exakt dein Wunschmaß hat">
+              <input id="chkShrinkComp" type="checkbox" />
+              <span>Automatisch größer drucken (<strong id="valShrinkFactor">×1.124</strong>)</span>
+            </label>
+            <div class="stats-grid">
+              <div class="stat-box"><div class="k">Nass (beim Drucken)</div><div id="stDimWet" class="v" style="font-size:11.5px;">–</div></div>
+              <div class="stat-box"><div class="k">Fertig (nach Brand)</div><div id="stDimFired" class="v" style="font-size:11.5px;color:var(--accent);">–</div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card collapsible collapsed editor-wrap">
+          <div class="card-header">
+            <span class="card-title"><span class="card-chevron">▾</span> Maschinencode (G-Code)</span>
+            <button id="btnReanalyzeEditor" class="chip" type="button">Code prüfen &amp; übernehmen</button>
+          </div>
+          <div class="card-body">
+            <textarea id="gcodeEditor" spellcheck="false" placeholder="G-Code wird hier angezeigt…"></textarea>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
