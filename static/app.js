@@ -15,6 +15,7 @@ const state = {
   activeProfileId: "wasp_2040_clay",
   presetShape: "espresso", // "espresso" | "tumbler" | "vase" | "lampshade" | "square_vase" | "parametric" | null
   uploadedModelId: null,
+  uploadedMesh: null,      // { buf, name, lastLayerH } -> auto re-sliced when layerH or printer changes!
   sourcePoints: null,      // Base unmodified polyline points (zero re-parsing!)
   buildCurrentGcode: null, // Lazy G-code text serializer (only runs on Save or Editor open!)
   sourceGcode: "",
@@ -1095,6 +1096,19 @@ function applyProcessing(isLive = false) {
         heightmap: { enabled: false },
       }).render;
     }
+  } else if (state.uploadedMesh && Math.abs((state.uploadedMesh.lastLayerH || 0) - options.layer_height_mm) > 1e-4) {
+    // Auto re-slice uploaded .stl/.obj when switching WASP <-> Ender-5 S1 or changing layer height!
+    const { pts } = sliceMeshToBasePoints(state.uploadedMesh.buf, state.uploadedMesh.name, state.activeProfileId, options.layer_height_mm);
+    state.uploadedMesh.lastLayerH = options.layer_height_mm;
+    state.sourcePoints = pts;
+    basePts = pts;
+    ghostOverride = processToolpath(basePts, state.activeProfileId, {
+      ...options,
+      weaving: { enabled: false },
+      nonplanar: { enabled: false },
+      oozing: { enabled: false },
+      heightmap: { enabled: false },
+    }).render;
   }
   if (!basePts || !basePts.length) {
     if (!isLive) showToast("Bitte zuerst eine Vorlage oder Datei laden.");
@@ -1624,6 +1638,7 @@ syncFaceMaskUI();
 function loadPresetShape(shape) {
   state.presetShape = shape;
   state.uploadedModelId = null;
+  state.uploadedMesh = null;
   if (shape === "parametric" && $("cardParametric")) {
     $("cardParametric").classList.remove("collapsed");
   }
@@ -1755,6 +1770,7 @@ async function readLocalFile(file) {
         const { pts, sliced_layers } = sliceMeshToBasePoints(buf, name, state.activeProfileId, lh);
         state.presetShape = null;
         state.uploadedModelId = null;
+        state.uploadedMesh = { buf, name, lastLayerH: lh };
         state.sourcePoints = pts;
         const baseRes = processToolpath(pts, state.activeProfileId, {
           ...collectCurrentOptions(),

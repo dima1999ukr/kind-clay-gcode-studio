@@ -667,7 +667,8 @@ export function sliceMeshToBasePoints(arrayBuffer, filename, profileId, layerH =
   }
   const cx = 0.5 * (minX + maxX), cy = 0.5 * (minY + maxY);
   const height = Math.max(5.0, maxZ - minZ);
-  const layers = Math.max(10, Math.min(600, Math.round(height / Math.max(0.15, layerH))));
+  const effLH = Math.max(0.08, Number(layerH) || 0.24);
+  const layers = Math.max(10, Math.min(2500, Math.round(height / effLH)));
   const BINS = 96;
   const profile = getProfile(profileId);
   const speedF = profile.default_speed_f;
@@ -676,7 +677,7 @@ export function sliceMeshToBasePoints(arrayBuffer, filename, profileId, layerH =
   const rings = [];
   const nT = tris.length / 9;
   for (let l = 0; l <= layers; l++) {
-    const zSlice = minZ + (l / layers) * (height - 0.1) + 0.05;
+    const zSlice = minZ + (l / layers) * (height - 0.08) + 0.04;
     const maxR = new Float32Array(BINS);
     for (let t = 0; t < nT; t++) {
       const o = t * 9;
@@ -709,7 +710,7 @@ export function sliceMeshToBasePoints(arrayBuffer, filename, profileId, layerH =
         }
       }
     }
-    rings.push({ z: zSlice - minZ + layerH, r: maxR });
+    rings.push({ z: zSlice - minZ + effLH, r: maxR });
   }
 
   if (rings.length < 2) throw new Error("Konnte keine geschlossenen Schichten aus dem 3D-Modell schneiden.");
@@ -1127,9 +1128,10 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     pushSeg(originX + wx, originY + wy, wz, en.f_orig, en.e_orig, 1.0, bellEnd, fwEnd, inRowEnd, i === 0 || en.travel);
   }
 
-  // Pack compact render data (cap at 75,000 segments for instant 60fps Three.js rendering)
+  // Pack compact render data (cap at 90,000 segments for instant 60fps Three.js rendering,
+  // ALWAYS connecting previous sampled point so high-layer Ender prints stay 100% continuous!)
   const totalSegs = Math.max(0, outMoves.length - 1);
-  const stride = Math.max(1, Math.ceil(totalSegs / 75000));
+  const stride = Math.max(1, Math.ceil(totalSegs / 90000));
   const packedCount = Math.ceil(totalSegs / stride);
   const coords = new Float32Array(packedCount * 6);
   const slopes = new Float32Array(packedCount);
@@ -1139,8 +1141,8 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const zs = new Float32Array(packedCount);
 
   let k = 0;
-  for (let i = 1; i < outMoves.length && k < packedCount; i += stride) {
-    const a = outMoves[i - 1], b = outMoves[i];
+  for (let i = stride; i < outMoves.length && k < packedCount; i += stride) {
+    const a = outMoves[i - stride], b = outMoves[i];
     const o6 = k * 6;
     coords[o6] = a.x; coords[o6 + 1] = a.y; coords[o6 + 2] = a.z;
     coords[o6 + 3] = b.x; coords[o6 + 4] = b.y; coords[o6 + 5] = b.z;
@@ -1194,6 +1196,17 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     ? { level: "ok", title: "Temperaturen (Clay)", detail: "Keine Heizbefehle aktiv – sauber für WASP 2040 LDM." }
     : { level: "ok", title: "Temperaturen (PLA)", detail: `Düse ${opts.nozzle_temp_c || 205} °C, Bett ${opts.bed_temp_c || 60} °C.` });
 
+  // Check actual physical vertical spacing between turns (catches WASP-sliced G-code opened on Ender!)
+  const actualTurns = turnZSum.size;
+  const actualLayerGap = actualTurns > 2 ? (bMaxZ - bMinZ) / actualTurns : layerH;
+  if (actualLayerGap > nozzleMm * 0.95) {
+    checks.push({
+      level: "error",
+      title: `Schichtabstand zu groß (${actualLayerGap.toFixed(2)} mm)!`,
+      detail: `Die Druckbahnen liegen bei ${nozzleMm.toFixed(1)} mm Düse nicht aufeinander! Bitte Schichthöhe auf ≤ ${(nozzleMm * 0.75).toFixed(2)} mm setzen oder Vorlage / .stl neu laden.`,
+    });
+  }
+
   const analysis = {
     profile_id: profile.id,
     profile_name: profile.name,
@@ -1210,6 +1223,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
       ooze_count: activeRows.size * oozeCount,
       print_length_m: Number((totalPrintMm / 1000.0).toFixed(2)),
       total_e_mm: Number(totalE.toFixed(1)),
+      est_time_s: Number(estTimeS.toFixed(1)),
       est_time_min: Number((estTimeS / 60.0).toFixed(1)),
       avg_layer_time_s: Number(avgLayerTimeS.toFixed(1)),
       max_slope_deg: Number(maxSlope.toFixed(1)),
@@ -1223,12 +1237,15 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   return {
     render,
     analysis,
-    buildGcode: () => serializeMovesToGcode(outMoves, profile, opts),
+    buildGcode: () => serializeMovesToGcode(outMoves, profile, { ...opts, _total_e_mm: totalE, _est_time_s: estTimeS, _layer_h: layerH }),
   };
 }
 
 function serializeMovesToGcode(moves, profile, opts = {}) {
   const lines = [
+    `;TIME:${Math.round(opts._est_time_s || 0)}`,
+    `;Filament used: ${((opts._total_e_mm || 0) / 1000.0).toFixed(3)}m`,
+    `;Layer height: ${(opts._layer_h || profile.default_layer_height_mm).toFixed(2)}`,
     renderStartGcode(profile, opts.nozzle_temp_c || 205, opts.bed_temp_c || 60, opts.fan_pct || 80),
     "; --- BEGIN CUSTOM TOOLPATH ---",
   ];
