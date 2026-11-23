@@ -911,6 +911,10 @@ function selectProfile(profileId, applyDefaults = true) {
     if ($("inNozzleTemp") && prof.default_nozzle_temp_c) $("inNozzleTemp").value = prof.default_nozzle_temp_c;
     if ($("inBedTemp") && prof.default_bed_temp_c !== undefined) $("inBedTemp").value = prof.default_bed_temp_c;
     if ($("inFanPct") && prof.default_fan_pct !== undefined) $("inFanPct").value = prof.default_fan_pct;
+    if ($("inBedAdhesion")) {
+      $("inBedAdhesion").value = prof.heated ? "brim" : "none";
+      if ($("wrapBrimWidth")) $("wrapBrimWidth").style.display = prof.heated ? "flex" : "none";
+    }
     $("oozeEvery").value = prof.heated ? 8 : 4;
     updateOozeEveryLabel();
   }
@@ -1048,6 +1052,9 @@ function collectCurrentOptions() {
     nozzle_temp_c: $("inNozzleTemp") ? Number($("inNozzleTemp").value) || 205 : 205,
     bed_temp_c: $("inBedTemp") ? Number($("inBedTemp").value) || 60 : 60,
     fan_pct: $("inFanPct") ? Number($("inFanPct").value) || 80 : 80,
+    wall_loops: $("inWallLoops") ? Number($("inWallLoops").value) || 1 : 1,
+    bed_adhesion: $("inBedAdhesion") ? $("inBedAdhesion").value : "none",
+    brim_width_mm: $("inBrimWidth") ? Number($("inBrimWidth").value) || 6.0 : 6.0,
     weaving: {
       enabled: $("weaveOn").checked,
       waveform: $("weaveWaveform") ? $("weaveWaveform").value : "sine",
@@ -1318,10 +1325,17 @@ updateShrinkageDimensions();
 });
 
 [
-  "chkRecalcE", "chkIncludeBase", "weaveOn", "weaveWaveform", "weaveMode", "npOn", "npMode", "oozeOn", "hmOn", "hmInvert",
+  "chkRecalcE", "chkIncludeBase", "inWallLoops", "inBedAdhesion", "weaveOn", "weaveWaveform", "weaveMode", "npOn", "npMode", "oozeOn", "hmOn", "hmInvert",
 ].forEach((id) => {
   if ($(id)) $(id).addEventListener("change", () => scheduleLiveUpdate(true));
 });
+
+if ($("inBedAdhesion")) {
+  $("inBedAdhesion").addEventListener("change", () => {
+    if ($("wrapBrimWidth")) $("wrapBrimWidth").style.display = $("inBedAdhesion").value === "none" ? "none" : "flex";
+  });
+}
+if ($("inBrimWidth")) bindRange("inBrimWidth", "valBrimWidth", (v) => `${Number(v).toFixed(1)} mm`);
 
 if ($("hmDepth")) bindRange("hmDepth", "valHmDepth", (v) => Number(v).toFixed(1));
 if ($("hmRepX")) bindRange("hmRepX", "valHmRepX", (v) => `${Number(v).toFixed(1)}×`);

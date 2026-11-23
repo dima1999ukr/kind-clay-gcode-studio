@@ -395,6 +395,31 @@
               </div>
             </div>
 
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label"><span>Schalen (Wände)</span></div>
+                <select id="inWallLoops">
+                  <option value="1" selected>1 Schale (Vasenmodus)</option>
+                  <option value="2">2 Schalen (stabiler)</option>
+                  <option value="3">3 Schalen (dickwandig)</option>
+                  <option value="4">4 Schalen (massiv)</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="field-label"><span>Bett-Haftung</span></div>
+                <select id="inBedAdhesion">
+                  <option value="none" selected>Aus</option>
+                  <option value="brim">Brim (Haftrand)</option>
+                  <option value="raft">Raft (2-Lagig)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="field" id="wrapBrimWidth" style="display:none;">
+              <div class="field-label"><span>Brim / Raft Breite (mm)</span><strong id="valBrimWidth">6.0 mm</strong></div>
+              <input id="inBrimWidth" type="range" min="2" max="16" step="1" value="6" />
+            </div>
+
             <label class="toggle-label" title="Aus = offener Boden (z. B. um den Tonboden später einzugießen)">
               <input id="chkIncludeBase" type="checkbox" checked />
               <span>Boden mitdrucken</span>

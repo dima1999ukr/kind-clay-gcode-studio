@@ -829,6 +829,14 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const hmZMax = Number(hm.z_max) || 100.0;
   const hmFade = Number(hm.fade_mm) || 5.0;
 
+  // Multi-wall shells & Bed adhesion (Brim / Raft)
+  const wallLoops = Math.max(1, Math.min(4, Math.round(Number(opts.wall_loops) || 1)));
+  const bedAdhesion = String(opts.bed_adhesion || "none").toLowerCase(); // none | brim | raft
+  const brimWidthMm = Math.max(2.0, Math.min(20.0, Number(opts.brim_width_mm) || 6.0));
+  const firstLayerZ = profile.heated ? Math.max(0.20, Math.min(layerH * 1.2, 0.32)) : layerH;
+  const raftAirGap = profile.heated ? 0.14 : 0.0;
+  const zOffsetModel = bedAdhesion === "raft" ? (2.0 * firstLayerZ + raftAirGap) : 0.0;
+
   // Selective 4-wall face mask
   const rawFaces = opts.active_faces;
   const allFour = new Set(["front", "right", "back", "left"]);
@@ -1043,7 +1051,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const bedD = (profile.bed_depth_mm || 220) + 0.5;
   const bedH = (profile.bed_height_mm || 400) + 0.5;
 
-  function pushSeg(fx, fy, fz, ptF, ptE, eFrac, bellRaw, fw, inRow, isTravel) {
+  function pushSeg(fx, fy, fz, ptF, ptE, eFrac, bellRaw, fw, inRow, isTravel, flowOverride = null, speedOverride = null) {
     if (!hasPrev || isTravel) {
       outMoves.push({ x: fx, y: fy, z: fz, e: 0, f: profile.travel_speed_f, travel: true, slope: 0, epm: 0 });
       prevX = fx; prevY = fy; prevZ = fz; hasPrev = true;
@@ -1055,17 +1063,17 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     const xy = Math.hypot(dx, dy);
     const slope = xy > 1e-5 ? (Math.atan2(Math.abs(dz), xy) * 180.0) / Math.PI : 0.0;
 
-    let localFlow = 1.0;
-    let localSpeed = recalcE ? baseSpeedF : ptF;
-    if (slope > 12.0) localSpeed *= Math.max(0.35, 1.0 - (slope - 12.0) / 45.0);
+    let localFlow = flowOverride !== null ? flowOverride : 1.0;
+    let localSpeed = speedOverride !== null ? speedOverride : (recalcE ? baseSpeedF : ptF);
+    if (speedOverride === null && slope > 12.0) localSpeed *= Math.max(0.35, 1.0 - (slope - 12.0) / 45.0);
 
-    if (inRow && fw > 1e-4) {
+    if (flowOverride === null && inRow && fw > 1e-4) {
       const modFlow = oozeFlowMin + (oozeFlowMax - oozeFlowMin) * bellRaw;
       localFlow *= (1.0 - fw) + modFlow * fw;
       localSpeed *= 1.0 - (1.0 - oozeSpeedMin) * (bellRaw * fw);
     }
     localSpeed = Math.max(120.0, localSpeed);
-    const eVal = Math.max(0.0, recalcE ? (len3d * ePerMmBase * localFlow) : (ptE * eFrac * flowMult * localFlow));
+    const eVal = Math.max(0.0, (recalcE || flowOverride !== null) ? (len3d * ePerMmBase * localFlow) : (ptE * eFrac * flowMult * localFlow));
     const isExt = eVal > 1e-6;
     const epm = isExt ? eVal / len3d : 0.0;
 
@@ -1092,10 +1100,90 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     prevX = fx; prevY = fy; prevZ = fz;
   }
 
-  for (let i = 0; i < n; i++) {
+  // --------------------------------------------------------------------------
+  // 0. BED ADHESION: BRIM or 2-LAYER RAFT (printed slowly on layer 1 for rock-solid bed grip!)
+  // --------------------------------------------------------------------------
+  if (bedAdhesion === "brim" || bedAdhesion === "raft") {
+    // Collect the bottom footprint ring (first complete wall turn)
+    let firstTi = null;
+    const footRing = [];
+    for (let i = 0; i < n; i++) {
+      if (srcPts[i].is_base || srcPts[i].travel || tTurnArr[i] < 0) continue;
+      const ti = Math.floor(tTurnArr[i]);
+      if (firstTi === null) firstTi = ti;
+      if (ti === firstTi) footRing.push({ rx: rxArr[i], ry: ryArr[i], nx: nxArr[i], ny: nyArr[i] });
+      else if (ti > firstTi) break;
+    }
+
+    if (footRing.length >= 8) {
+      const slowSpeed = Math.max(300, baseSpeedF * 0.50);
+      const step = Math.max(0.28, lineW * 0.94);
+
+      if (bedAdhesion === "brim") {
+        const nRings = Math.max(2, Math.min(36, Math.round(brimWidthMm / step)));
+        for (let r = nRings; r >= 1; r--) {
+          const off = r * step;
+          for (let j = 0; j <= footRing.length; j++) {
+            const fp = footRing[j % footRing.length];
+            const bx = originX + fp.rx + fp.nx * off;
+            const by = originY + fp.ry + fp.ny * off;
+            pushSeg(bx, by, firstLayerZ, slowSpeed, 0, 1, 0, 0, false, j === 0 && r === nRings, 1.12, slowSpeed);
+          }
+        }
+      } else {
+        // 2-Layer Solid Raft: outer perimeter + alternating X/Y hatch inside expanded footprint
+        const emitRaftLayer = (zLay, marginMm, hatchAxis, spacing, flowBoost) => {
+          // 1. Two solid outer perimeter rings
+          for (let p = 0; p < 2; p++) {
+            const off = Math.max(0.5, marginMm - p * step);
+            for (let j = 0; j <= footRing.length; j++) {
+              const fp = footRing[j % footRing.length];
+              pushSeg(originX + fp.rx + fp.nx * off, originY + fp.ry + fp.ny * off, zLay, slowSpeed, 0, 1, 0, 0, false, j === 0, flowBoost, slowSpeed);
+            }
+          }
+          // 2. Build expanded polygon for clean scanline infill
+          const poly = footRing.map((fp) => [fp.rx + fp.nx * (marginMm - step), fp.ry + fp.ny * (marginMm - step)]);
+          let pMin = Infinity, pMax = -Infinity;
+          for (const pt of poly) {
+            const c = hatchAxis === "x" ? pt[1] : pt[0];
+            if (c < pMin) pMin = c; if (c > pMax) pMax = c;
+          }
+          let flip = false;
+          for (let scan = pMin + spacing * 0.5; scan < pMax; scan += spacing) {
+            const hits = [];
+            for (let j = 0; j < poly.length; j++) {
+              const a = poly[j], b = poly[(j + 1) % poly.length];
+              const ca = hatchAxis === "x" ? a[1] : a[0];
+              const cb = hatchAxis === "x" ? b[1] : b[0];
+              if ((ca <= scan && cb > scan) || (cb <= scan && ca > scan)) {
+                const t = (scan - ca) / (cb - ca);
+                hits.push(hatchAxis === "x" ? (a[0] + t * (b[0] - a[0])) : (a[1] + t * (b[1] - a[1])));
+              }
+            }
+            if (hits.length >= 2) {
+              hits.sort((u, v) => u - v);
+              const lo = hits[0], hi = hits[hits.length - 1];
+              const x0 = originX + (hatchAxis === "x" ? (flip ? hi : lo) : scan);
+              const y0 = originY + (hatchAxis === "x" ? scan : (flip ? hi : lo));
+              const x1 = originX + (hatchAxis === "x" ? (flip ? lo : hi) : scan);
+              const y1 = originY + (hatchAxis === "x" ? scan : (flip ? lo : hi));
+              pushSeg(x0, y0, zLay, slowSpeed, 0, 1, 0, 0, false, true, flowBoost, slowSpeed);
+              pushSeg(x1, y1, zLay, slowSpeed, 0, 1, 0, 0, false, false, flowBoost, slowSpeed);
+              flip = !flip;
+            }
+          }
+        };
+        emitRaftLayer(firstLayerZ, brimWidthMm, "x", Math.max(0.55, lineW * 1.25), 1.18);
+        emitRaftLayer(2.0 * firstLayerZ, Math.max(1.5, brimWidthMm * 0.78), "y", Math.max(0.40, lineW * 1.02), 1.05);
+      }
+    }
+  }
+
+  // Helper to emit a single outer-shell vertex index (including exact 2-point Brick corners)
+  function emitOuterIndex(i, forceTravel = false) {
     const en = srcPts[i];
-    // Exact 2-point crisp 90-deg Brick corner insertion
     if (
+      !forceTravel &&
       weaveOn && weaveWave === "square" && Math.abs(weaveH) > 1e-6 &&
       i > 0 && !en.travel && !en.is_base && !srcPts[i - 1].is_base &&
       tTurnArr[i] > tTurnArr[i - 1] + 1e-7
@@ -1128,7 +1216,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
             const seq = kind === 1 ? [-1.0, 1.0] : [1.0, -1.0];
             for (const bOv of seq) {
               const [bx, by, bz, bBell, bFw, bIn] = applyModsAt(irx, iry, irz, tCross, false, inx, iny, bOv);
-              pushSeg(originX + bx, originY + by, bz, en.f_orig, en.e_orig, 0.2, bBell, bFw, bIn, false);
+              pushSeg(originX + bx, originY + by, bz + zOffsetModel, en.f_orig, en.e_orig, 0.2, bBell, bFw, bIn, false);
             }
           }
         }
@@ -1136,7 +1224,60 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     }
 
     const [wx, wy, wz, bellEnd, fwEnd, inRowEnd] = applyModsAt(rxArr[i], ryArr[i], rzArr[i], tTurnArr[i], en.is_base, nxArr[i], nyArr[i]);
-    pushSeg(originX + wx, originY + wy, wz, en.f_orig, en.e_orig, 1.0, bellEnd, fwEnd, inRowEnd, i === 0 || en.travel);
+    pushSeg(originX + wx, originY + wy, wz + zOffsetModel, en.f_orig, en.e_orig, 1.0, bellEnd, fwEnd, inRowEnd, forceTravel || i === 0 || en.travel);
+  }
+
+  // --------------------------------------------------------------------------
+  // 1. EMIT BASE + WALLS (1 shell = pure continuous spiral; 2-4 shells = inner backing shells + outer modulated shell per layer!)
+  // --------------------------------------------------------------------------
+  if (wallLoops <= 1) {
+    for (let i = 0; i < n; i++) {
+      emitOuterIndex(i, i === 0 && bedAdhesion !== "none");
+    }
+  } else {
+    // Emit base layers first
+    let firstBase = true;
+    for (let i = 0; i < n; i++) {
+      if (!srcPts[i].is_base) continue;
+      emitOuterIndex(i, firstBase);
+      firstBase = false;
+    }
+    // Group wall indices by turn (layer)
+    const turnIndices = new Map();
+    for (let i = 0; i < n; i++) {
+      if (srcPts[i].is_base || tTurnArr[i] < 0) continue;
+      const ti = Math.floor(tTurnArr[i]);
+      if (!turnIndices.has(ti)) turnIndices.set(ti, []);
+      turnIndices.get(ti).push(i);
+    }
+    const sortedTurns = Array.from(turnIndices.keys()).sort((a, b) => a - b);
+    const shellStep = Math.max(0.25, lineW * 0.95);
+
+    for (let tk = 0; tk < sortedTurns.length; tk++) {
+      const idxs = turnIndices.get(sortedTurns[tk]);
+      if (!idxs || idxs.length < 3) continue;
+
+      // Inner structural backing shells (from innermost -> outward, smooth & full 1.0x flow so holes never weaken the print!)
+      for (let s = wallLoops - 1; s >= 1; s--) {
+        const inset = s * shellStep;
+        for (let m = 0; m <= idxs.length; m++) {
+          const i = idxs[m % idxs.length];
+          const en = srcPts[i];
+          // Keep Non-Planar Z synced with outer wall so inner & outer shells never collide!
+          const [, , wz] = applyModsAt(rxArr[i], ryArr[i], rzArr[i], tTurnArr[i], false, nxArr[i], nyArr[i]);
+          const rCur = Math.hypot(rxArr[i], ryArr[i]);
+          const effInset = Math.min(inset, Math.max(0, rCur - 3.0));
+          const ix = originX + rxArr[i] - nxArr[i] * effInset;
+          const iy = originY + ryArr[i] - nyArr[i] * effInset;
+          pushSeg(ix, iy, wz + zOffsetModel, en.f_orig, en.e_orig, 1.0, 0, 0, false, m === 0 && s === wallLoops - 1 && tk === 0);
+        }
+      }
+
+      // Outer modulated shell (s = 0)
+      for (let m = 0; m < idxs.length; m++) {
+        emitOuterIndex(idxs[m], false);
+      }
+    }
   }
 
   // Pack compact render data (cap at 90,000 segments for instant 60fps Three.js rendering,
