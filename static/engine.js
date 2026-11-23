@@ -1257,25 +1257,72 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
       const idxs = turnIndices.get(sortedTurns[tk]);
       if (!idxs || idxs.length < 3) continue;
 
-      // Inner structural backing shells (from innermost -> outward, smooth & full 1.0x flow so holes never weaken the print!)
+      // Build exact modulated outer contour for this turn (including crisp 2-point Brick corners)
+      // so every inner shell follows the EXACT same waves/bricks/relief right beside the outer line!
+      const turnMod = [];
+      for (let m = 0; m < idxs.length; m++) {
+        const i = idxs[m];
+        const en = srcPts[i];
+        if (
+          weaveOn && weaveWave === "square" && Math.abs(weaveH) > 1e-6 &&
+          i > 0 && !en.travel && !en.is_base && !srcPts[i - 1].is_base &&
+          tTurnArr[i] > tTurnArr[i - 1] + 1e-7
+        ) {
+          const t0 = tTurnArr[i - 1], t1 = tTurnArr[i];
+          const ti0 = Math.floor(t0), ti1 = Math.floor(t1);
+          if (ti0 === ti1) {
+            const p0 = (t0 - ti0) * weaveFreq + ti0 * weavePhase;
+            const p1 = (t1 - ti0) * weaveFreq + ti0 * weavePhase;
+            if (p1 > p0 + 1e-7) {
+              const kMin = Math.floor(p0) - 1, kMax = Math.ceil(p1) + 1;
+              const evs = [];
+              for (let k = kMin; k <= kMax; k++) {
+                if (p0 < k && k < p1) evs.push([k, 1]);
+                const pf = k + weaveBrickDuty;
+                if (p0 < pf && pf < p1) evs.push([pf, -1]);
+              }
+              evs.sort((a, b) => a[0] - b[0]);
+              for (const [pCross, kind] of evs) {
+                const alpha = Math.max(0, Math.min(1, (pCross - p0) / (p1 - p0)));
+                const tCross = t0 + alpha * (t1 - t0);
+                const irx = rxArr[i - 1] + alpha * (rxArr[i] - rxArr[i - 1]);
+                const iry = ryArr[i - 1] + alpha * (ryArr[i] - ryArr[i - 1]);
+                const irz = rzArr[i - 1] + alpha * (rzArr[i] - rzArr[i - 1]);
+                if (faceMaskWeight(irx, iry) <= 1e-4 || zoneWeight(irz, weaveZMin, weaveZMax, weaveFade) <= 1e-4) continue;
+                let inx = nxArr[i - 1] + alpha * (nxArr[i] - nxArr[i - 1]);
+                let iny = nyArr[i - 1] + alpha * (nyArr[i] - nyArr[i - 1]);
+                const ilen = Math.hypot(inx, iny);
+                if (ilen > 1e-5) { inx /= ilen; iny /= ilen; }
+                const seq = kind === 1 ? [-1.0, 1.0] : [1.0, -1.0];
+                for (const bOv of seq) {
+                  const [bx, by, bz, bBell, bFw, bIn] = applyModsAt(irx, iry, irz, tCross, false, inx, iny, bOv);
+                  turnMod.push({ wx: bx, wy: by, wz: bz, nx: inx, ny: iny, f: en.f_orig, e: en.e_orig, eFrac: 0.2, bell: bBell, fw: bFw, inRow: bIn });
+                }
+              }
+            }
+          }
+        }
+        const [wx, wy, wz, bellEnd, fwEnd, inRowEnd] = applyModsAt(rxArr[i], ryArr[i], rzArr[i], tTurnArr[i], false, nxArr[i], nyArr[i]);
+        turnMod.push({ wx, wy, wz, nx: nxArr[i], ny: nyArr[i], f: en.f_orig, e: en.e_orig, eFrac: 1.0, bell: bellEnd, fw: fwEnd, inRow: inRowEnd });
+      }
+
+      // Inner parallel offset shells (s = wallLoops-1 down to 1): exact modulated contour shifted inward by s * lineW * 0.95
       for (let s = wallLoops - 1; s >= 1; s--) {
         const inset = s * shellStep;
-        for (let m = 0; m <= idxs.length; m++) {
-          const i = idxs[m % idxs.length];
-          const en = srcPts[i];
-          // Keep Non-Planar Z synced with outer wall so inner & outer shells never collide!
-          const [, , wz] = applyModsAt(rxArr[i], ryArr[i], rzArr[i], tTurnArr[i], false, nxArr[i], nyArr[i]);
-          const rCur = Math.hypot(rxArr[i], ryArr[i]);
+        for (let m = 0; m <= turnMod.length; m++) {
+          const pt = turnMod[m % turnMod.length];
+          const rCur = Math.hypot(pt.wx, pt.wy);
           const effInset = Math.min(inset, Math.max(0, rCur - 3.0));
-          const ix = originX + rxArr[i] - nxArr[i] * effInset;
-          const iy = originY + ryArr[i] - nyArr[i] * effInset;
-          pushSeg(ix, iy, wz + zOffsetModel, en.f_orig, en.e_orig, 1.0, 0, 0, false, m === 0 && s === wallLoops - 1 && tk === 0);
+          const ix = originX + pt.wx - pt.nx * effInset;
+          const iy = originY + pt.wy - pt.ny * effInset;
+          pushSeg(ix, iy, pt.wz + zOffsetModel, pt.f, pt.e, pt.eFrac, 0, 0, false, m === 0 && s === wallLoops - 1 && tk === 0);
         }
       }
 
       // Outer modulated shell (s = 0)
-      for (let m = 0; m < idxs.length; m++) {
-        emitOuterIndex(idxs[m], false);
+      for (let m = 0; m < turnMod.length; m++) {
+        const pt = turnMod[m];
+        pushSeg(originX + pt.wx, originY + pt.wy, pt.wz + zOffsetModel, pt.f, pt.e, pt.eFrac, pt.bell, pt.fw, pt.inRow, false);
       }
     }
   }
