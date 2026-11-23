@@ -1,14 +1,25 @@
 import * as THREE from "./vendor/three.module.min.js";
 import { OrbitControls } from "./vendor/OrbitControls.js";
+import {
+  PRINTER_PROFILES,
+  generateBasePoints,
+  processToolpath,
+  parseGcodeToPoints,
+  sliceMeshToBasePoints,
+  registerHeightmapFile,
+  registerProceduralHeightmap,
+} from "./engine.js";
 
 const state = {
-  profiles: {},
+  profiles: PRINTER_PROFILES,
   activeProfileId: "wasp_2040_clay",
-  presetShape: "espresso", // "espresso" | "lampshade" | null (uploaded / GH file)
-  uploadedModelId: null,   // server cache ID for uploaded .3dm/.stl/.obj/.3mf
-  sourceGcode: "",         // Original loaded G-code (modifiers stack non-destructively on this)
-  currentGcode: "",        // Processed / edited G-code
-  filename: "demo.gcode",
+  presetShape: "espresso", // "espresso" | "tumbler" | "vase" | "lampshade" | "square_vase" | "parametric" | null
+  uploadedModelId: null,
+  sourcePoints: null,      // Base unmodified polyline points (zero re-parsing!)
+  buildCurrentGcode: null, // Lazy G-code text serializer (only runs on Save or Editor open!)
+  sourceGcode: "",
+  currentGcode: "",
+  filename: "espressotasse.gcode",
   renderData: null,
   ghostRenderData: null,   // Unmodified base geometry for translucent ghost comparison
   showGhost: true,
@@ -909,30 +920,45 @@ function selectProfile(profileId, applyDefaults = true) {
 
 let _editorSyncTimer = null;
 
-function loadResultIntoView(filename, gcode, renderData, analysis, updateSource = true, deferEditor = false, ghostOverride = null) {
+function syncGcodeEditorIfOpen() {
+  const ed = $("gcodeEditor");
+  if (!ed) return;
+  const card = ed.closest(".card.collapsible");
+  if (card && card.classList.contains("collapsed")) return; // Lazy: don't build 10MB string while editor is collapsed!
+  if (!state.currentGcode && typeof state.buildCurrentGcode === "function") {
+    state.currentGcode = state.buildCurrentGcode();
+  }
+  const gc = state.currentGcode || "";
+  ed.value = gc.length > 400000
+    ? gc.slice(0, 400000) + "\n; ... [Ansicht gekuerzt – vollstaendige Datei wird exportiert]"
+    : gc;
+}
+
+function loadResultIntoView(filename, gcodeOrBuilder, renderData, analysis, updateSource = true, deferEditor = false, ghostOverride = null) {
   state.filename = filename;
+  if (typeof gcodeOrBuilder === "function") {
+    state.buildCurrentGcode = gcodeOrBuilder;
+    state.currentGcode = ""; // Lazily built only when saving or opening editor!
+  } else {
+    state.buildCurrentGcode = null;
+    state.currentGcode = String(gcodeOrBuilder || "");
+    if (updateSource) state.sourceGcode = state.currentGcode;
+  }
   if (updateSource) {
-    state.sourceGcode = gcode;
     state.ghostRenderData = renderData; // Keep original unmodified base geometry for ghost overlay
   } else if (ghostOverride) {
     state.ghostRenderData = ghostOverride;
   }
-  state.currentGcode = gcode;
   state.renderData = renderData;
   state.analysis = analysis;
 
   $("currentFileBadge").textContent = filename;
 
-  const syncEditor = () => {
-    $("gcodeEditor").value = state.currentGcode.length > 400000
-      ? state.currentGcode.slice(0, 400000) + "\n; ... [Ansicht gekuerzt – vollstaendige Datei wird exportiert]"
-      : state.currentGcode;
-  };
   clearTimeout(_editorSyncTimer);
   if (deferEditor) {
-    _editorSyncTimer = setTimeout(syncEditor, 280);
+    _editorSyncTimer = setTimeout(syncGcodeEditorIfOpen, 220);
   } else {
-    syncEditor();
+    syncGcodeEditorIfOpen();
   }
 
   if (analysis && analysis.bounds) {
@@ -949,40 +975,31 @@ function loadResultIntoView(filename, gcode, renderData, analysis, updateSource 
   buildToolpathMesh(renderData, analysis);
 }
 
-async function analyzeRawGcode(gcode, updateSource = false) {
-  const res = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      gcode,
-      profile_id: state.activeProfileId,
-      max_nozzle_angle_deg: Number($("inMaxAngle").value) || 28,
-    }),
+function analyzeRawGcode(gcode, updateSource = false) {
+  const { pts } = parseGcodeToPoints(gcode);
+  if (updateSource) state.sourcePoints = pts;
+  const res = processToolpath(pts, state.activeProfileId, {
+    recenter: false,
+    recalc_e: false,
+    max_nozzle_angle_deg: Number($("inMaxAngle").value) || 28,
   });
-  const data = await res.json();
-  loadResultIntoView(state.filename, gcode, data.render, data.analysis, updateSource);
+  loadResultIntoView(state.filename, gcode, res.render, res.analysis, updateSource);
 }
 
 let _liveDebounceTimer = null;
-let _activeProcessAbort = null;
 
 function scheduleLiveUpdate(immediate = false) {
   if (!$("chkLiveUpdate") || !$("chkLiveUpdate").checked) return;
-  if (!state.sourceGcode) return;
+  if (!state.sourcePoints && !state.presetShape) return;
   clearTimeout(_liveDebounceTimer);
   _liveDebounceTimer = setTimeout(() => {
     applyProcessing(true);
-  }, immediate ? 15 : 85);
+  }, immediate ? 5 : 22);
 }
 
-async function applyProcessing(isLive = false) {
-  if (!state.sourceGcode) {
-    if (!isLive) showToast("Bitte zuerst eine .gcode Datei laden.");
-    return;
-  }
-  const options = {
+function collectCurrentOptions() {
+  return {
     preset_shape: state.presetShape,
-    model_id: state.uploadedModelId,
     include_base: $("chkIncludeBase").checked,
     active_faces: Array.from(state.activeFaces),
     parametric: state.presetShape === "parametric" ? {
@@ -1058,31 +1075,35 @@ async function applyProcessing(isLive = false) {
       fade_mm: 5.0,
     },
   };
+}
 
-  if (_activeProcessAbort) _activeProcessAbort.abort();
-  _activeProcessAbort = new AbortController();
+function applyProcessing(isLive = false) {
+  const options = collectCurrentOptions();
+  let basePts = state.sourcePoints;
+  let ghostOverride = null;
 
-  if (!isLive) $("btnApplyProcess").textContent = "Berechne Toolpath…";
-  try {
-    const res = await fetch("/api/process", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: _activeProcessAbort.signal,
-      body: JSON.stringify({
-        gcode: state.sourceGcode,
-        target_profile_id: state.activeProfileId,
-        options,
-      }),
-    });
-    const data = await res.json();
-    loadResultIntoView(state.filename, data.gcode, data.render, data.analysis, false, isLive, data.ghost_render || null);
-    if (!isLive) showToast(`Aktualisiert (${state.profiles[state.activeProfileId].short_name})`);
-  } catch (err) {
-    if (err && err.name === "AbortError") return;
-    throw err;
-  } finally {
-    if (!isLive) $("btnApplyProcess").textContent = "Jetzt neu berechnen";
+  if (state.presetShape) {
+    basePts = generateBasePoints(state.presetShape, state.activeProfileId, options);
+    state.sourcePoints = basePts;
+    if (state.presetShape === "parametric" || options.shrinkage_compensate) {
+      // Update ghost shell live when sculpting profile or scaling shrinkage
+      ghostOverride = processToolpath(basePts, state.activeProfileId, {
+        ...options,
+        weaving: { enabled: false },
+        nonplanar: { enabled: false },
+        oozing: { enabled: false },
+        heightmap: { enabled: false },
+      }).render;
+    }
   }
+  if (!basePts || !basePts.length) {
+    if (!isLive) showToast("Bitte zuerst eine Vorlage oder Datei laden.");
+    return;
+  }
+
+  const res = processToolpath(basePts, state.activeProfileId, options);
+  loadResultIntoView(state.filename, res.buildGcode, res.render, res.analysis, false, isLive, ghostOverride);
+  if (!isLive) showToast(`Aktualisiert (${state.profiles[state.activeProfileId].short_name})`);
 }
 
 async function loadFromGrasshopper(silent = false) {
@@ -1253,27 +1274,14 @@ if ($("hmDepth")) bindRange("hmDepth", "valHmDepth", (v) => Number(v).toFixed(1)
 if ($("hmRepX")) bindRange("hmRepX", "valHmRepX", (v) => `${Number(v).toFixed(1)}×`);
 if ($("hmRepY")) bindRange("hmRepY", "valHmRepY", (v) => `${Number(v).toFixed(1)}×`);
 
-// Image-Heightmap upload + procedural pattern buttons
+// Image-Heightmap upload + procedural pattern buttons (100% browser Canvas!)
 if ($("btnHmUpload") && $("hmFileInput")) {
   $("btnHmUpload").onclick = () => $("hmFileInput").click();
   $("hmFileInput").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      const buf = await file.arrayBuffer();
-      const res = await fetch("/api/upload-heightmap", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "X-Filename": encodeURIComponent(file.name),
-        },
-        body: buf,
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        showToast(data.error || "Bild-Upload fehlgeschlagen.");
-        return;
-      }
+      const data = await registerHeightmapFile(file);
       state.heightmapId = data.heightmap_id;
       $("hmStatusBadge").textContent = `${data.name.slice(0, 14)}`;
       $("hmOn").checked = true;
@@ -1286,10 +1294,9 @@ if ($("btnHmUpload") && $("hmFileInput")) {
 }
 
 document.querySelectorAll("[data-hm-proc]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
+  btn.addEventListener("click", () => {
     const kind = btn.dataset.hmProc;
-    const res = await fetch(`/api/procedural-heightmap?kind=${encodeURIComponent(kind)}`);
-    const data = await res.json();
+    const data = registerProceduralHeightmap(kind);
     state.heightmapId = data.heightmap_id;
     $("hmStatusBadge").textContent = btn.textContent;
     $("hmOn").checked = true;
@@ -1614,14 +1621,13 @@ syncFaceMaskUI();
   });
 })();
 
-async function loadPresetShape(shape) {
+function loadPresetShape(shape) {
   state.presetShape = shape;
   state.uploadedModelId = null;
   if (shape === "parametric" && $("cardParametric")) {
     $("cardParametric").classList.remove("collapsed");
   }
   if (shape === "square_vase") {
-    // Default to front wall only so selective 1-wall modulation vs. 3 smooth walls is immediately visible
     if ($("cardFaceMask")) $("cardFaceMask").classList.remove("collapsed");
     setActiveFaces(["front"], false);
     if (!$("weaveOn").checked && !$("npOn").checked && !$("oozeOn").checked) {
@@ -1631,21 +1637,37 @@ async function loadPresetShape(shape) {
   } else {
     setActiveFaces(["front", "right", "back", "left"], false);
   }
-  const baseFlag = $("chkIncludeBase").checked ? "1" : "0";
-  const lh = Number($("inLayerH").value) || 1.2;
-  const lw = Number($("inLineW").value) || 2.2;
-  const res = await fetch(`/api/preset?shape=${encodeURIComponent(shape)}&base=${baseFlag}&layer_h=${lh}&line_w=${lw}&profile=${state.activeProfileId}`);
-  const data = await res.json();
-  loadResultIntoView(data.filename, data.gcode, data.render, data.analysis, true);
-  // If parametric or any modifier is active, immediately apply onto the newly chosen preset
+
+  const names = {
+    espresso: "espressotasse",
+    tumbler: "becher_tumbler",
+    vase: "bauchige_vase",
+    lampshade: "lampenschirm",
+    square_vase: "viereckige_vase",
+    parametric: "eigene_form",
+  };
+  const fname = `${names[shape] || shape}.gcode`;
+  const opts = collectCurrentOptions();
+  const basePts = generateBasePoints(shape, state.activeProfileId, opts);
+  state.sourcePoints = basePts;
+
+  const baseRes = processToolpath(basePts, state.activeProfileId, {
+    ...opts,
+    weaving: { enabled: false },
+    nonplanar: { enabled: false },
+    oozing: { enabled: false },
+    heightmap: { enabled: false },
+  });
+  loadResultIntoView(fname, baseRes.buildGcode, baseRes.render, baseRes.analysis, true);
+
   if (shape === "parametric" || $("weaveOn").checked || $("npOn").checked || $("oozeOn").checked || ($("hmOn") && $("hmOn").checked)) {
-    await applyProcessing(true);
+    applyProcessing(true);
   }
   resetCamera();
   const label = $("presetSelect").options[$("presetSelect").selectedIndex]?.text || shape;
   showToast(shape === "square_vase"
-    ? `Preset geladen: ${label} (Textur nur auf Vorne – klicke beliebige Wand im 3D!)`
-    : `Preset geladen: ${label}`);
+    ? `Vorlage geladen: ${label} (Muster nur auf Vorne – klicke beliebige Wand im 3D!)`
+    : `Vorlage geladen: ${label}`);
 }
 
 $("presetSelect").addEventListener("change", (e) => {
@@ -1663,6 +1685,9 @@ $("btnReanalyzeEditor").onclick = () => {
 };
 
 $("btnSaveGcode").onclick = async () => {
+  if (!state.currentGcode && typeof state.buildCurrentGcode === "function") {
+    state.currentGcode = state.buildCurrentGcode();
+  }
   if (!state.currentGcode) return;
   const base = state.filename.replace(/\.(gcode|gco|3dm|stl|obj|3mf|ply)$/i, "");
   const suffix = state.activeProfileId === "ender_5_s1" ? "ender5s1" : "wasp2040";
@@ -1724,8 +1749,30 @@ async function readLocalFile(file) {
     showToast(`Importiere & slice 3D-Modell (${name})…`);
     try {
       const buf = await file.arrayBuffer();
-      const lh = Number($("inLayerH").value) || 0.4;
-      const lw = Number($("inLineW").value) || 0.5;
+      const lh = Number($("inLayerH").value) || 1.2;
+      if (ext === ".stl" || ext === ".obj") {
+        // 100% client-side fast spiral slicer (works offline & on GitHub Pages!)
+        const { pts, sliced_layers } = sliceMeshToBasePoints(buf, name, state.activeProfileId, lh);
+        state.presetShape = null;
+        state.uploadedModelId = null;
+        state.sourcePoints = pts;
+        const baseRes = processToolpath(pts, state.activeProfileId, {
+          ...collectCurrentOptions(),
+          weaving: { enabled: false },
+          nonplanar: { enabled: false },
+          oozing: { enabled: false },
+          heightmap: { enabled: false },
+        });
+        loadResultIntoView(name, baseRes.buildGcode, baseRes.render, baseRes.analysis, true);
+        if ($("weaveOn").checked || $("npOn").checked || $("oozeOn").checked || ($("hmOn") && $("hmOn").checked)) {
+          applyProcessing(true);
+        }
+        resetCamera();
+        showToast(`3D importiert: ${name} (${sliced_layers} Schichten)`);
+        return;
+      }
+      // Fallback for .3dm/.3mf/.ply if running with local Python backend
+      const lw = Number($("inLineW").value) || 2.2;
       const baseFlag = $("chkIncludeBase").checked ? "1" : "0";
       const url = `/api/import-model?profile=${encodeURIComponent(state.activeProfileId)}&layer_h=${lh}&line_w=${lw}&base=${baseFlag}`;
       const res = await fetch(url, {
@@ -1736,19 +1783,21 @@ async function readLocalFile(file) {
         },
         body: buf,
       });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        showToast(data.error || "3D-Import fehlgeschlagen.");
+      if (!res.ok) {
+        showToast(`${ext} benötigt lokalen Python-Server – Tipp: in Rhino kurz als .stl oder .obj exportieren!`);
         return;
       }
+      const data = await res.json();
       state.presetShape = null;
       state.uploadedModelId = data.model_id;
+      const { pts } = parseGcodeToPoints(data.gcode);
+      state.sourcePoints = pts;
       loadResultIntoView(data.filename, data.gcode, data.render, data.analysis, true);
       resetCamera();
       const mi = data.model_info || {};
       showToast(`3D importiert: ${name} (${mi.sliced_layers || "?"} Layer)`);
     } catch (err) {
-      showToast(`3D-Import Fehler: ${err.message || err}`);
+      showToast(`${ext === ".3dm" ? "Rhino .3dm bitte als .stl oder .obj exportieren" : `3D-Import Fehler: ${err.message || err}`}`);
     }
     return;
   }
@@ -1797,7 +1846,11 @@ if ($("printerSelect")) {
 document.querySelectorAll(".card.collapsible .card-header").forEach((hdr) => {
   hdr.addEventListener("click", (e) => {
     if (e.target.closest("input, label, button, select")) return;
-    hdr.closest(".card").classList.toggle("collapsed");
+    const card = hdr.closest(".card");
+    card.classList.toggle("collapsed");
+    if (!card.classList.contains("collapsed") && card.querySelector("#gcodeEditor")) {
+      syncGcodeEditorIfOpen();
+    }
   });
 });
 
@@ -1942,18 +1995,14 @@ $("btnPlay").onclick = () => {
   $("btnPlay").textContent = state.playing ? "⏸ Pause" : "▶ Simulieren";
 };
 
-async function init() {
+function init() {
   resizeViewport();
-  const res = await fetch("/api/profiles");
-  const data = await res.json();
-  state.profiles = data.profiles;
+  state.profiles = PRINTER_PROFILES;
   selectProfile("wasp_2040_clay", true);
 
-  // Always start with the selected Preset (Espressotasse) on Delta WASP 2040 Clay
+  // Instant 100% client-side startup (zero server wait!)
   const initialShape = $("presetSelect").value || "espresso";
-  const demo = await (await fetch(`/api/preset?shape=${initialShape}&profile=wasp_2040_clay`)).json();
-  loadResultIntoView(demo.filename, demo.gcode, demo.render, demo.analysis, true);
-  resetCamera();
+  loadPresetShape(initialShape);
 
   animate();
 }

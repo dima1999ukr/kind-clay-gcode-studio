@@ -1,6 +1,9 @@
 # KIND Clay Custom G-Code Studio
 
-Parametrisches Ton-3D-Druck Studio für die **Delta WASP 2040 Clay (LDM)** – entwickelt im Rahmen von **KIND Clay** (Hochschule Trier, Campus Gestaltung).
+**Live im Browser (GitHub Pages – 100 % client-seitig, ohne Installation):**
+👉 **https://dima1999ukr.github.io/kind-clay-gcode-studio/**
+
+Parametrisches Ton- & FDM-3D-Druck Studio für die **Delta WASP 2040 Clay (LDM)** und **Creality Ender-5 S1 (PLA)** – entwickelt im Rahmen von **KIND Clay** (Hochschule Trier, Campus Gestaltung).
 
 ## Features
 - **Form-Sculptor (Profil A–E):** Interaktiver 2D-Profil-Editor mit 5 ziehbaren Kontrollpunkten, Höhe (`35–260 mm`), Seitenanzahl (`3–64` + Ecken-Rundung) und Twist (`-240° bis +240°`).
