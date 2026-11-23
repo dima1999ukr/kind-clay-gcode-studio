@@ -1063,6 +1063,7 @@ function collectCurrentOptions() {
       sharpness: Number($("weaveSharp").value),
       freq: Number($("weaveFreq").value),
       phase_shift: Number($("weavePhase").value),
+      every_n_layers: $("weaveEvery") ? Number($("weaveEvery").value) || 1 : 1,
       h_amp_mm: Number($("weaveH").value),
       z_min: Number($("weaveZMin").value),
       z_max: Number($("weaveZMax").value),
@@ -1073,6 +1074,7 @@ function collectCurrentOptions() {
       mode: $("npMode") ? $("npMode").value : "waves",
       freq: Number($("npFreq").value),
       phase_shift: Number($("npPhase").value),
+      every_n_layers: $("npEvery") ? Number($("npEvery").value) || 1 : 1,
       z_amp_mm: Number($("npZ").value),
       z_min: Number($("npZMin").value),
       z_max: Number($("npZMax").value),
@@ -1217,9 +1219,17 @@ function bindRange(inputId, labelId, fmt = (v) => v) {
 }
 
 function updateOozeEveryLabel() {
-  const n = Number($("oozeEvery").value) || 1;
   const lh = Number($("inLayerH").value) || 0.24;
+  const n = Number($("oozeEvery").value) || 1;
   $("valOozeEvery").textContent = `${n} (${(n * lh).toFixed(1)} mm)`;
+  if ($("weaveEvery") && $("valWeaveEvery")) {
+    const nw = Number($("weaveEvery").value) || 1;
+    $("valWeaveEvery").textContent = nw === 1 ? "Jede (1)" : `${nw} (${(nw * lh).toFixed(1)} mm)`;
+  }
+  if ($("npEvery") && $("valNpEvery")) {
+    const nn = Number($("npEvery").value) || 1;
+    $("valNpEvery").textContent = nn === 1 ? "Jede (1)" : `${nn} (${(nn * lh).toFixed(1)} mm)`;
+  }
 }
 
 bindRange("inFlow", "valFlow", (v) => `${Number(v).toFixed(2)}×`);
@@ -1235,6 +1245,14 @@ bindRange("oozeCount", "valOozeCount");
 $("oozeEvery").addEventListener("input", () => {
   updateOozeEveryLabel();
   scheduleLiveUpdate(false);
+});
+["weaveEvery", "npEvery"].forEach((id) => {
+  if ($(id)) {
+    $(id).addEventListener("input", () => {
+      updateOozeEveryLabel();
+      scheduleLiveUpdate(false);
+    });
+  }
 });
 $("inLayerH").addEventListener("input", () => {
   updateOozeEveryLabel();

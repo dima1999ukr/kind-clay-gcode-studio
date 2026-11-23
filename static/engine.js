@@ -791,6 +791,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const weaveSharp = Math.max(0.5, Math.min(6.0, Number(weave.sharpness) || 1.8));
   const weaveFreq = Number(weave.freq) || 16;
   const weavePhase = Number(weave.phase_shift) || 0.5;
+  const weaveEveryN = Math.max(1, Math.round(Number(weave.every_n_layers) || 1));
   const weaveH = Number(weave.h_amp_mm) || 2.0;
   const weaveZMin = Number(weave.z_min) || 6.0;
   const weaveZMax = Number(weave.z_max) || 58.0;
@@ -801,6 +802,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const npMode = String(np.mode || "waves").toLowerCase();
   const npFreq = Number(np.freq) || 12;
   const npPhase = Number(np.phase_shift) || 0.5;
+  const npEveryN = Math.max(1, Math.round(Number(np.every_n_layers) || 1));
   const npZ = Number(np.z_amp_mm) || 1.2;
   const npZMin = Number(np.z_min) || 8.0;
   const npZMax = Number(np.z_max) || 58.0;
@@ -984,17 +986,18 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     const uLocal = tTurnVal - ti;
     let rxOut = rx0, ryOut = ry0, rzOut = rz0;
 
-    if (weaveOn && Math.abs(weaveH) > 1e-6) {
+    if (weaveOn && Math.abs(weaveH) > 1e-6 && (ti % weaveEveryN === 0)) {
       const wXY = zoneWeight(rz0, weaveZMin, weaveZMax, weaveFade) * fw;
       if (wXY > 0) {
+        const wRow = Math.floor(ti / weaveEveryN);
         let hFactor;
         if (weaveWave === "square") {
           const wv = brickOverride !== null
             ? brickOverride
-            : (((((uLocal * weaveFreq + ti * weavePhase) % 1.0) + 1.0) % 1.0) < weaveBrickDuty ? 1.0 : -1.0);
+            : (((((uLocal * weaveFreq + wRow * weavePhase) % 1.0) + 1.0) % 1.0) < weaveBrickDuty ? 1.0 : -1.0);
           hFactor = weaveMode === "outward" ? (wv > 0 ? 1.0 : 0.0) : wv;
         } else {
-          const theta = 2.0 * Math.PI * (uLocal * weaveFreq + ti * weavePhase);
+          const theta = 2.0 * Math.PI * (uLocal * weaveFreq + wRow * weavePhase);
           const wv = evalWaveform(theta, weaveWave);
           hFactor = weaveMode === "outward" ? (Math.max(0, (1 + wv) * 0.5) ** weaveSharp) : wv;
         }
@@ -1015,7 +1018,7 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
       }
     }
 
-    if (npOn && Math.abs(npZ) > 1e-6) {
+    if (npOn && Math.abs(npZ) > 1e-6 && (npMode !== "waves" || (ti % npEveryN === 0))) {
       if (npMode === "rim_wave") {
         const wZ = smoothstep(npZMin, vesselMaxZ, rz0) * fw;
         if (wZ > 0) rzOut = Math.max(0.15, rzOut + Math.sin(2.0 * Math.PI * (uLocal * npFreq + npPhase)) * npZ * wZ);
@@ -1028,7 +1031,8 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
         }
       } else {
         const wZ = zoneWeight(rz0, npZMin, npZMax, npFade) * fw;
-        if (wZ > 0) rzOut = Math.max(0.15, rzOut + Math.sin(2.0 * Math.PI * (uLocal * npFreq + ti * npPhase)) * npZ * wZ);
+        const npRow = Math.floor(ti / npEveryN);
+        if (wZ > 0) rzOut = Math.max(0.15, rzOut + Math.sin(2.0 * Math.PI * (uLocal * npFreq + npRow * npPhase)) * npZ * wZ);
       }
     }
 
@@ -1190,9 +1194,10 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
     ) {
       const t0 = tTurnArr[i - 1], t1 = tTurnArr[i];
       const ti0 = Math.floor(t0), ti1 = Math.floor(t1);
-      if (ti0 === ti1) {
-        const p0 = (t0 - ti0) * weaveFreq + ti0 * weavePhase;
-        const p1 = (t1 - ti0) * weaveFreq + ti0 * weavePhase;
+      if (ti0 === ti1 && (ti0 % weaveEveryN === 0)) {
+        const wRow = Math.floor(ti0 / weaveEveryN);
+        const p0 = (t0 - ti0) * weaveFreq + wRow * weavePhase;
+        const p1 = (t1 - ti0) * weaveFreq + wRow * weavePhase;
         if (p1 > p0 + 1e-7) {
           const kMin = Math.floor(p0) - 1, kMax = Math.ceil(p1) + 1;
           const evs = [];
