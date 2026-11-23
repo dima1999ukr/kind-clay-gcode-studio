@@ -6,6 +6,7 @@ import {
   processToolpath,
   parseGcodeToPoints,
   sliceMeshToBasePoints,
+  resampleSpiralPoints,
   registerHeightmapFile,
   registerProceduralHeightmap,
 } from "./engine.js";
@@ -16,6 +17,8 @@ const state = {
   presetShape: "espresso", // "espresso" | "tumbler" | "vase" | "lampshade" | "square_vase" | "parametric" | null
   uploadedModelId: null,
   uploadedMesh: null,      // { buf, name, lastLayerH } -> auto re-sliced when layerH or printer changes!
+  rawGcodePts: null,       // Points of a loaded .gcode file -> auto re-spaced to the current layer height
+  faceAspect: [1, 1],      // Half extents (x, y) of the current object for aspect-correct wall picking
   sourcePoints: null,      // Base unmodified polyline points (zero re-parsing!)
   buildCurrentGcode: null, // Lazy G-code text serializer (only runs on Save or Editor open!)
   sourceGcode: "",
@@ -250,7 +253,8 @@ const FACE_LABELS = {
 };
 
 function getFaceFromPrinterXY(px, py) {
-  const ang = Math.atan2(py, px);
+  const [hx, hy] = state.faceAspect || [1, 1];
+  const ang = Math.atan2(py / Math.max(1, hy), px / Math.max(1, hx));
   if (ang >= -Math.PI * 0.25 && ang < Math.PI * 0.25) return "right";
   if (ang >= Math.PI * 0.25 && ang < Math.PI * 0.75) return "back";
   if (ang >= -Math.PI * 0.75 && ang < -Math.PI * 0.25) return "front";
@@ -965,6 +969,10 @@ function loadResultIntoView(filename, gcodeOrBuilder, renderData, analysis, upda
   if (analysis && analysis.bounds) {
     const zMax = Math.max(10, Math.round(analysis.bounds.max_z - 4));
     if (updateSource) {
+      state.faceAspect = [
+        Math.max(1, 0.5 * (analysis.bounds.max_x - analysis.bounds.min_x)),
+        Math.max(1, 0.5 * (analysis.bounds.max_y - analysis.bounds.min_y)),
+      ];
       $("weaveZMax").value = zMax;
       $("npZMax").value = zMax;
       $("oozeZMax").value = zMax;
@@ -978,13 +986,28 @@ function loadResultIntoView(filename, gcodeOrBuilder, renderData, analysis, upda
 
 function analyzeRawGcode(gcode, updateSource = false) {
   const { pts } = parseGcodeToPoints(gcode);
-  if (updateSource) state.sourcePoints = pts;
+  if (updateSource) {
+    state.sourcePoints = pts;
+    state.rawGcodePts = pts;
+    state.rawGcodeLayerKey = null;
+  }
   const res = processToolpath(pts, state.activeProfileId, {
     recenter: false,
     recalc_e: false,
     max_nozzle_angle_deg: Number($("inMaxAngle").value) || 28,
   });
   loadResultIntoView(state.filename, gcode, res.render, res.analysis, updateSource);
+
+  // Loaded spiral G-code with too coarse layers for the current printer (e.g. 1.2 mm clay file on Ender-5 S1)?
+  if (updateSource) {
+    const lh = Number($("inLayerH").value) || 0.2;
+    const noz = Number($("inNozzle").value) || 0.4;
+    const test = resampleSpiralPoints(pts, lh, noz);
+    if (test) {
+      applyProcessing(true);
+      showToast(`Schichtabstand ${test.source_gap.toFixed(2)} mm → automatisch auf ${lh.toFixed(2)} mm umgerechnet (${test.layers} Schichten)`);
+    }
+  }
 }
 
 let _liveDebounceTimer = null;
@@ -1109,6 +1132,22 @@ function applyProcessing(isLive = false) {
       oozing: { enabled: false },
       heightmap: { enabled: false },
     }).render;
+  } else if (state.rawGcodePts) {
+    // Loaded .gcode: re-space spiral layers to the current layer height when they don't match
+    const key = `${state.activeProfileId}_${options.layer_height_mm}_${options.nozzle_mm}`;
+    if (state.rawGcodeLayerKey !== key) {
+      const rs = resampleSpiralPoints(state.rawGcodePts, options.layer_height_mm, options.nozzle_mm);
+      state.sourcePoints = rs ? rs.pts : state.rawGcodePts;
+      state.rawGcodeLayerKey = key;
+      basePts = state.sourcePoints;
+      ghostOverride = processToolpath(basePts, state.activeProfileId, {
+        ...options,
+        weaving: { enabled: false },
+        nonplanar: { enabled: false },
+        oozing: { enabled: false },
+        heightmap: { enabled: false },
+      }).render;
+    }
   }
   if (!basePts || !basePts.length) {
     if (!isLive) showToast("Bitte zuerst eine Vorlage oder Datei laden.");
@@ -1639,6 +1678,7 @@ function loadPresetShape(shape) {
   state.presetShape = shape;
   state.uploadedModelId = null;
   state.uploadedMesh = null;
+  state.rawGcodePts = null;
   if (shape === "parametric" && $("cardParametric")) {
     $("cardParametric").classList.remove("collapsed");
   }
@@ -1771,6 +1811,7 @@ async function readLocalFile(file) {
         state.presetShape = null;
         state.uploadedModelId = null;
         state.uploadedMesh = { buf, name, lastLayerH: lh };
+        state.rawGcodePts = null;
         state.sourcePoints = pts;
         const baseRes = processToolpath(pts, state.activeProfileId, {
           ...collectCurrentOptions(),

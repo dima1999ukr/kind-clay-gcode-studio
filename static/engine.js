@@ -266,21 +266,22 @@ function sampleHeightmap(hm, u, v) {
 // ============================================================================
 // BASE GEOMETRY GENERATORS (Presets + Parametric + STL/OBJ + G-Code)
 // ============================================================================
-function roundedSquareRing(halfW, cornerR, nPts = 128) {
-  const r = Math.max(1.0, Math.min(cornerR, halfW - 1.0));
-  const straight = Math.max(0.0, 2.0 * (halfW - r));
+function roundedRectRing(halfW, halfD, cornerR, nPts = 128) {
+  const r = Math.max(1.0, Math.min(cornerR, halfW - 1.0, halfD - 1.0));
+  const straightX = Math.max(0.0, 2.0 * (halfW - r));
+  const straightY = Math.max(0.0, 2.0 * (halfD - r));
   const arcLen = 0.5 * Math.PI * r;
-  const perim = 4.0 * (straight + arcLen);
+  const perim = 2.0 * straightX + 2.0 * straightY + 4.0 * arcLen;
   const segs = [
-    ["line", [halfW, 0], [halfW, halfW - r], straight * 0.5],
-    ["arc", [halfW - r, halfW - r], 0, 0.5 * Math.PI, arcLen],
-    ["line", [halfW - r, halfW], [-(halfW - r), halfW], straight],
-    ["arc", [-(halfW - r), halfW - r], 0.5 * Math.PI, Math.PI, arcLen],
-    ["line", [-halfW, halfW - r], [-halfW, -(halfW - r)], straight],
-    ["arc", [-(halfW - r), -(halfW - r)], Math.PI, 1.5 * Math.PI, arcLen],
-    ["line", [-(halfW - r), -halfW], [halfW - r, -halfW], straight],
-    ["arc", [halfW - r, -(halfW - r)], 1.5 * Math.PI, 2.0 * Math.PI, arcLen],
-    ["line", [halfW, -(halfW - r)], [halfW, 0], straight * 0.5],
+    ["line", [halfW, 0], [halfW, halfD - r], straightY * 0.5],
+    ["arc", [halfW - r, halfD - r], 0, 0.5 * Math.PI, arcLen],
+    ["line", [halfW - r, halfD], [-(halfW - r), halfD], straightX],
+    ["arc", [-(halfW - r), halfD - r], 0.5 * Math.PI, Math.PI, arcLen],
+    ["line", [-halfW, halfD - r], [-halfW, -(halfD - r)], straightY],
+    ["arc", [-(halfW - r), -(halfD - r)], Math.PI, 1.5 * Math.PI, arcLen],
+    ["line", [-(halfW - r), -halfD], [halfW - r, -halfD], straightX],
+    ["arc", [halfW - r, -(halfD - r)], 1.5 * Math.PI, 2.0 * Math.PI, arcLen],
+    ["line", [halfW, -(halfD - r)], [halfW, 0], straightY * 0.5],
   ];
   const pts = [];
   for (let i = 0; i < nPts; i++) {
@@ -403,16 +404,22 @@ export function generateBasePoints(shape, profileId, opts = {}) {
   };
 
   if (shape === "square_vase") {
-    const height = 120.0, halfW = 42.0, cornerR = 10.0;
+    // Book-format ceramic wall (110 mm wide x 36 mm deep x 140 mm high, R=6 mm corners)
+    const height = 140.0, halfW = 55.0, halfD = 18.0, cornerR = 6.0;
     const baseLayers = includeBase ? (layerH >= 0.8 ? 1 : 2) : 0;
     if (baseLayers > 0) {
       const stepR = Math.max(0.45, lineW * 0.92);
-      const ringsN = Math.max(4, Math.round((halfW - 2.0) / stepR));
+      const ringsN = Math.max(4, Math.round((halfD - 1.5) / stepR));
       for (let bl = 0; bl < baseLayers; bl++) {
         const zb = (bl + 1) * layerH;
         for (let rk = 1; rk <= ringsN; rk++) {
           const frac = rk / ringsN;
-          const ring = roundedSquareRing(2.0 + frac * (halfW - 2.0), Math.max(1.0, cornerR * frac), 48);
+          const ring = roundedRectRing(
+            Math.max(2.0, halfW - (halfD - 1.5) * (1.0 - frac)),
+            1.5 + frac * (halfD - 1.5),
+            Math.max(1.0, cornerR * frac),
+            56
+          );
           for (let i = 0; i < ring.length; i++) {
             pushPt(ring[i][0], ring[i][1], zb, (rk === 1 && i === 0), true);
           }
@@ -423,7 +430,7 @@ export function generateBasePoints(shape, profileId, opts = {}) {
     const wallH = Math.max(10.0, height - zStart);
     const layers = Math.max(12, Math.round(wallH / layerH));
     const ptsPerTurn = 128;
-    const ring = roundedSquareRing(halfW, cornerR, ptsPerTurn);
+    const ring = roundedRectRing(halfW, halfD, cornerR, ptsPerTurn);
     const total = layers * ptsPerTurn;
     for (let i = 0; i <= total; i++) {
       const v = i / total;
@@ -828,10 +835,14 @@ export function processToolpath(basePoints, targetProfileId, opts = {}) {
   const useFaceMask = Array.isArray(rawFaces) && rawFaces.length < 4;
   const activeFaces = useFaceMask ? new Set(rawFaces.map((f) => String(f).toLowerCase())) : allFour;
 
+  const faceHalfX = Math.max(1.0, 0.5 * (sMaxX - sMinX) * scaleXY);
+  const faceHalfY = Math.max(1.0, 0.5 * (sMaxY - sMinY) * scaleXY);
+
   function faceMaskWeight(rx0, ry0) {
     if (!useFaceMask) return 1.0;
     if (activeFaces.size === 0) return 0.0;
-    const angDeg = (Math.atan2(ry0, rx0) * 180.0) / Math.PI;
+    // Aspect-normalized angle so flat book-format walls split exactly at their real corners
+    const angDeg = (Math.atan2(ry0 / faceHalfY, rx0 / faceHalfX) * 180.0) / Math.PI;
     let face, leftNb, rightNb, local;
     if (angDeg >= -45 && angDeg < 45) { face = "right"; leftNb = "back"; rightNb = "front"; local = angDeg; }
     else if (angDeg >= 45 && angDeg < 135) { face = "back"; leftNb = "left"; rightNb = "right"; local = angDeg - 90; }
@@ -1264,4 +1275,118 @@ function serializeMovesToGcode(moves, profile, opts = {}) {
   lines.push("; --- END CUSTOM TOOLPATH ---");
   lines.push(profile.end_gcode);
   return lines.join("\n") + "\n";
+}
+
+// ============================================================================
+// SPIRAL LAYER RESAMPLER
+// Re-spaces a loaded spiral G-code (e.g. sliced with 1.2 mm clay layers) to the
+// target layer height of the current printer (e.g. 0.12 mm on the Ender-5 S1).
+// Returns null if no resampling is needed or the toolpath is not a spiral vessel.
+// ============================================================================
+export function resampleSpiralPoints(pts, layerH, nozzleMm = 0.4) {
+  const wall = pts.filter((p) => !p.is_base && !p.travel);
+  if (wall.length < 200) return null;
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const p of wall) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  const cx = 0.5 * (minX + maxX);
+  const cy = 0.5 * (minY + maxY);
+
+  const BINS = 128;
+  const TWO_PI = 2 * Math.PI;
+  const turns = new Map();
+  let prevAng = null;
+  let unwrapped = 0;
+
+  for (const p of wall) {
+    const ang = Math.atan2(p.y - cy, p.x - cx);
+    if (prevAng === null) {
+      unwrapped = ang >= 0 ? ang : ang + TWO_PI;
+    } else {
+      let d = ang - prevAng;
+      if (d > Math.PI) d -= TWO_PI;
+      else if (d < -Math.PI) d += TWO_PI;
+      unwrapped += d;
+    }
+    prevAng = ang;
+    const ti = Math.floor(unwrapped / TWO_PI);
+    let row = turns.get(ti);
+    if (!row) {
+      row = { r: new Float32Array(BINS), zSum: 0, n: 0 };
+      turns.set(ti, row);
+    }
+    const angPos = ang >= 0 ? ang : ang + TWO_PI;
+    const b = Math.min(BINS - 1, Math.floor((angPos / TWO_PI) * BINS));
+    const rr = Math.hypot(p.x - cx, p.y - cy);
+    if (rr > row.r[b]) row.r[b] = rr;
+    row.zSum += p.z;
+    row.n += 1;
+  }
+
+  const direction = unwrapped >= 0 ? 1 : -1;
+  const rings = [];
+  for (const row of turns.values()) {
+    let filled = 0;
+    for (let b = 0; b < BINS; b++) if (row.r[b] > 0) filled++;
+    if (filled < BINS * 0.4) continue;
+    for (let b = 0; b < BINS; b++) {
+      if (row.r[b] > 0) continue;
+      for (let off = 1; off < BINS; off++) {
+        const a = row.r[(b + off) % BINS];
+        if (a > 0) { row.r[b] = a; break; }
+        const c = row.r[(b - off + BINS) % BINS];
+        if (c > 0) { row.r[b] = c; break; }
+      }
+    }
+    rings.push({ z: row.zSum / row.n, r: row.r });
+  }
+  if (rings.length < 3) return null;
+  rings.sort((a, b) => a.z - b.z);
+
+  const actualGap = (maxZ - minZ) / rings.length;
+  const targetH = Math.max(0.08, Number(layerH) || 0.2);
+  // Only resample when the source spacing clearly does not match the target layer height
+  if (actualGap < Math.max(targetH * 1.5, nozzleMm * 0.9)) return null;
+
+  const z0 = rings[0].z;
+  const z1 = rings[rings.length - 1].z;
+  const layers = Math.max(10, Math.min(4000, Math.round((z1 - z0) / targetH)));
+  const total = layers * BINS;
+  const speedF = wall[0].f_orig || 1800;
+  const out = [];
+
+  // Keep original base / floor points untouched
+  for (const p of pts) if (p.is_base) out.push({ ...p });
+
+  let ri = 0;
+  for (let i = 0; i <= total; i++) {
+    const v = i / total;
+    const z = z0 + v * (z1 - z0);
+    while (ri < rings.length - 2 && rings[ri + 1].z < z) ri++;
+    const ra = rings[ri];
+    const rb = rings[ri + 1];
+    const f = Math.max(0, Math.min(1, (z - ra.z) / Math.max(1e-6, rb.z - ra.z)));
+    const step = i % BINS;
+    const b = direction > 0 ? step : (BINS - step) % BINS;
+    const rad = ra.r[b] * (1 - f) + rb.r[b] * f;
+    const ang = (b / BINS) * TWO_PI;
+    out.push({
+      x: cx + rad * Math.cos(ang),
+      y: cy + rad * Math.sin(ang),
+      z,
+      travel: out.length === 0,
+      is_base: false,
+      f_orig: speedF,
+      e_orig: 0,
+    });
+  }
+  return { pts: out, layers, source_gap: actualGap };
 }
